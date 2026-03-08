@@ -590,10 +590,19 @@ function VeloLawInner() {
 
   const Results = () => {
     if (!results) return <Empty onLoad={()=>{setMode("demo");runDemoAnalysis();}}/>;
-    const good=results.equations.filter(e=>e.r2>=0.3);
-    const best=results.equations.reduce((a,b)=>a.r2>b.r2?a:b);
-    const r2data={labels:["Early","Spec.","Diff.","Mature"],datasets:results.equations.reduce((acc,eq)=>{const si=["Early Progenitor","Specification","Differentiation","Maturation"].indexOf(eq.stage);const ex=acc.find(d=>d.label===eq.gene);if(ex){if(si>=0)ex.data[si]=Math.max(0,eq.r2);}else{const d=Array(4).fill(null);if(si>=0)d[si]=Math.max(0,eq.r2);acc.push({label:eq.gene,data:d,color:eq.color});}return acc;},{})};
-    const progdata={labels:results.stageProgression?.Ins2?.map(p=>p.stage)||[],datasets:[{label:"Fit Ins2",data:results.stageProgression?.Ins2?.map(p=>Math.max(0,p.r2))||[],color:T.accent},{label:"Complexity/200",data:results.stageProgression?.Ins2?.map(p=>p.complexity/200)||[],color:T.accent3,dash:"4,2"}]};
+    const eqs = Array.isArray(results.equations) ? results.equations : [];
+    const good = eqs.filter(e=>e.r2>=0.3);
+    const best = eqs.length > 0 ? eqs.reduce((a,b)=>a.r2>b.r2?a:b) : {gene:"—",stage:"—",r2:0};
+    // Build r2data safely without .find on accumulator
+    const geneMap = {};
+    eqs.forEach(eq => {
+      const si = ["Early Progenitor","Specification","Differentiation","Maturation"].indexOf(eq.stage);
+      if (!geneMap[eq.gene]) geneMap[eq.gene] = {label:eq.gene, data:[null,null,null,null], color:eq.color||"#888"};
+      if (si >= 0) geneMap[eq.gene].data[si] = Math.max(0, eq.r2||0);
+    });
+    const r2data = {labels:["Early","Spec.","Diff.","Mature"], datasets:Object.values(geneMap)};
+    const ins2prog = results.stageProgression?.Ins2 || [];
+    const progdata = {labels:ins2prog.map(p=>p.stage), datasets:[{label:"Fit Ins2",data:ins2prog.map(p=>Math.max(0,p.r2||0)),color:T.accent},{label:"Complexity/200",data:ins2prog.map(p=>(p.complexity||0)/200),color:T.accent3,dash:"4,2"}]};
     return (
       <div style={{padding:"22px 28px"}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:18}}>
