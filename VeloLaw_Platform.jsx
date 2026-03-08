@@ -793,7 +793,7 @@ function VeloLawInner() {
           </div>
           {aiErr && <div style={{color:T.danger,fontSize:12,marginBottom:9,lineHeight:1.5}}>{aiErr}</div>}
           {aiLoad && <div style={{display:"flex",alignItems:"center",gap:9,color:T.accent3,fontSize:13}}><Spinner size={15} color={T.accent3}/> Analyzing with LLaMA 3.3 70B…</div>}
-          {aiOut && <div style={{fontSize:13,color:T.text,lineHeight:1.8,background:T.surface2,borderRadius:10,padding:15,marginTop:8}} dangerouslySetInnerHTML={{__html:aiOut.replace(/\*\*(.+?)\*\*/g,"<strong style='color:#f0f2f8'>$1</strong>").replace(/\n\n/g,"<br/><br/>")}}/>}
+          {aiOut && <div style={{fontSize:13,color:T.text,lineHeight:1.8,background:T.surface2,borderRadius:10,padding:15,marginTop:8,maxHeight:500,overflowY:"auto"}} dangerouslySetInnerHTML={{__html:aiOut.replace(/\*\*(.+?)\*\*/g,"<strong style='color:#f0f2f8'>$1</strong>").replace(/\n\n/g,"<br/><br/>")}}/>}
         </Card>
         <Card style={{padding:18}}>
           <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14}}>
