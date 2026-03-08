@@ -8,16 +8,7 @@ import { fileURLToPath } from 'url';
 import { spawn } from 'child_process';
 import multer from 'multer';
 import os from 'os';
-
-// Multer — store uploads in OS temp dir, keep original extension
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, os.tmpdir()),
-  filename:    (req, file, cb) => {
-    const ext  = path.extname(file.originalname);
-    cb(null, `velolaw_${Date.now()}${ext}`);
-  },
-});
-const upload = multer({ storage, limits: { fileSize: 2 * 1024 * 1024 * 1024 } }); // 2GB max
+import Database from 'better-sqlite3';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app  = express();
@@ -28,55 +19,108 @@ const ADMIN_EMAIL      = process.env.ADMIN_EMAIL      || 'anais@velolaw.io';
 const ADMIN_PASSWORD   = process.env.ADMIN_PASSWORD   || 'velolaw-admin-2025';
 const ADMIN_JWT_SECRET = process.env.ADMIN_JWT_SECRET || 'velolaw-admin-secret-change';
 
-// ─── In-memory DB ─────────────────────────────────────────────
-const db = {
-  users:     [],
-  analyses:  [],
-  sessions:  [],
-  events:    [],
-  nextUserId:     1,
-  nextAnalysisId: 1,
-  nextSessionId:  1,
-  nextEventId:    1,
+// ─── SQLite setup ─────────────────────────────────────────────
+const DB_PATH = path.join(__dirname, 'velolaw.db');
+const db = new Database(DB_PATH);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    email TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    plan TEXT DEFAULT 'free',
+    status TEXT DEFAULT 'active',
+    created_at TEXT DEFAULT (datetime('now')),
+    last_login TEXT,
+    login_count INTEGER DEFAULT 0,
+    analysis_count INTEGER DEFAULT 0,
+    last_ip TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    email TEXT,
+    name TEXT,
+    ip TEXT,
+    user_agent TEXT,
+    login_at TEXT DEFAULT (datetime('now')),
+    active INTEGER DEFAULT 1,
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS analyses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    name TEXT,
+    status TEXT DEFAULT 'processing',
+    step TEXT DEFAULT 'Queued',
+    pct INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    params TEXT,
+    results TEXT,
+    summary TEXT,
+    error TEXT,
+    file_path TEXT,
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT,
+    user_id INTEGER,
+    email TEXT,
+    detail TEXT,
+    ip TEXT,
+    at TEXT DEFAULT (datetime('now'))
+  );
+`);
+
+// ─── DB helpers ───────────────────────────────────────────────
+const logEvent = (type, userId, email, detail, ip = '') => {
+  db.prepare('INSERT INTO events (type, user_id, email, detail, ip) VALUES (?, ?, ?, ?, ?)')
+    .run(type, userId, email, detail, ip);
 };
 
-// ─── Helpers ──────────────────────────────────────────────────
-function logEvent(type, userId, email, detail, ip = '') {
-  db.events.unshift({ id: db.nextEventId++, type, userId, email, detail, ip, at: new Date().toISOString() });
-  if (db.events.length > 500) db.events.pop();
-}
+const getClientIp = req =>
+  req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || 'unknown';
 
-function getClientIp(req) {
-  return req.headers['x-forwarded-for']?.split(',')[0]?.trim()
-    || req.socket?.remoteAddress || 'unknown';
-}
-
-function getUserAgent(req) {
+const getUserAgent = req => {
   const ua = req.headers['user-agent'] || '';
   if (ua.includes('Firefox')) return 'Firefox / ' + (ua.includes('Windows') ? 'Windows' : ua.includes('Mac') ? 'macOS' : 'Linux');
   if (ua.includes('Chrome'))  return 'Chrome / '  + (ua.includes('Windows') ? 'Windows' : ua.includes('Mac') ? 'macOS' : ua.includes('Android') ? 'Android' : 'Linux');
-  if (ua.includes('Safari'))  return 'Safari / '  + (ua.includes('iPhone') || ua.includes('iPad') ? 'iOS' : 'macOS');
-  if (ua.includes('Edge'))    return 'Edge / Windows';
+  if (ua.includes('Safari'))  return 'Safari / iOS';
   return ua.slice(0, 40) || 'Unknown';
-}
+};
+
+// ─── Multer ───────────────────────────────────────────────────
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, os.tmpdir()),
+  filename:    (req, file, cb) => {
+    const ext = path.extname(file.originalname);
+    cb(null, `velolaw_${Date.now()}${ext}`);
+  },
+});
+const upload = multer({ storage, limits: { fileSize: 2 * 1024 * 1024 * 1024 } });
 
 // ─── Middleware ────────────────────────────────────────────────
 app.use(cors({ origin: '*', credentials: true }));
 app.use(express.json({ limit: '100mb' }));
 
-function authMiddleware(req, res, next) {
+const authMiddleware = (req, res, next) => {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.status(401).json({ error: 'No token' });
   try { req.user = jwt.verify(token, JWT_SECRET); next(); }
   catch { res.status(401).json({ error: 'Invalid token' }); }
-}
+};
 
-function adminMiddleware(req, res, next) {
+const adminMiddleware = (req, res, next) => {
   const token = req.headers['x-admin-token'];
   if (!token) return res.status(401).json({ error: 'No admin token' });
   try { req.admin = jwt.verify(token, ADMIN_JWT_SECRET); next(); }
   catch { res.status(401).json({ error: 'Invalid admin token' }); }
-}
+};
 
 // ─── USER AUTH ─────────────────────────────────────────────────
 app.post('/api/register', async (req, res) => {
@@ -84,20 +128,18 @@ app.post('/api/register', async (req, res) => {
   const ip = getClientIp(req);
   if (!name || !email || !password) return res.status(400).json({ error: 'All fields required' });
   if (email === ADMIN_EMAIL) return res.status(400).json({ error: 'Email not available' });
-  if (db.users.find(u => u.email === email)) return res.status(400).json({ error: 'Email already registered' });
+
+  const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
+  if (existing) return res.status(400).json({ error: 'Email already registered' });
 
   const passwordHash = await bcrypt.hash(password, 10);
-  const user = {
-    id: db.nextUserId++, name, email, passwordHash,
-    plan: 'free', status: 'active',
-    createdAt: new Date().toISOString(),
-    lastLogin: null, loginCount: 0, analysisCount: 0, lastIp: ip,
-  };
-  db.users.push(user);
-  logEvent('register', user.id, email, `New user: ${name}`, ip);
+  const result = db.prepare(
+    'INSERT INTO users (name, email, password_hash, last_ip) VALUES (?, ?, ?, ?)'
+  ).run(name, email, passwordHash, ip);
 
-  const token = jwt.sign({ id: user.id, email, name }, JWT_SECRET, { expiresIn: '7d' });
-  res.json({ token, user: { id: user.id, name, email, plan: user.plan } });
+  logEvent('register', result.lastInsertRowid, email, `New user: ${name}`, ip);
+  const token = jwt.sign({ id: result.lastInsertRowid, email, name }, JWT_SECRET, { expiresIn: '7d' });
+  res.json({ token, user: { id: result.lastInsertRowid, name, email, plan: 'free' } });
 });
 
 app.post('/api/login', async (req, res) => {
@@ -105,22 +147,16 @@ app.post('/api/login', async (req, res) => {
   const ip = getClientIp(req);
   const ua = getUserAgent(req);
 
-  const user = db.users.find(u => u.email === email);
+  const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
   if (!user) { logEvent('failed_login', null, email, 'Invalid email', ip); return res.status(400).json({ error: 'Invalid credentials' }); }
-  if (user.status === 'suspended') { logEvent('failed_login', user.id, email, 'Suspended account login attempt', ip); return res.status(403).json({ error: 'Account suspended.' }); }
+  if (user.status === 'suspended') return res.status(403).json({ error: 'Account suspended.' });
 
-  const valid = await bcrypt.compare(password, user.passwordHash);
+  const valid = await bcrypt.compare(password, user.password_hash);
   if (!valid) { logEvent('failed_login', user.id, email, 'Wrong password', ip); return res.status(400).json({ error: 'Invalid credentials' }); }
 
-  user.lastLogin  = new Date().toISOString();
-  user.loginCount = (user.loginCount || 0) + 1;
-  user.lastIp     = ip;
-
-  db.sessions.forEach(s => { if (s.userId === user.id) s.active = false; });
-  const session = { id: db.nextSessionId++, userId: user.id, email, name: user.name, ip, userAgent: ua, loginAt: new Date().toISOString(), active: true };
-  db.sessions.unshift(session);
-  if (db.sessions.length > 200) db.sessions.pop();
-
+  db.prepare('UPDATE users SET last_login = datetime("now"), login_count = login_count + 1, last_ip = ? WHERE id = ?').run(ip, user.id);
+  db.prepare('UPDATE sessions SET active = 0 WHERE user_id = ?').run(user.id);
+  db.prepare('INSERT INTO sessions (user_id, email, name, ip, user_agent) VALUES (?, ?, ?, ?, ?)').run(user.id, email, user.name, ip, ua);
   logEvent('login', user.id, email, `Login from ${ip} (${ua})`, ip);
 
   const token = jwt.sign({ id: user.id, email, name: user.name }, JWT_SECRET, { expiresIn: '7d' });
@@ -128,117 +164,104 @@ app.post('/api/login', async (req, res) => {
 });
 
 app.post('/api/logout', authMiddleware, (req, res) => {
-  db.sessions.forEach(s => { if (s.userId === req.user.id && s.active) s.active = false; });
+  db.prepare('UPDATE sessions SET active = 0 WHERE user_id = ?').run(req.user.id);
   logEvent('logout', req.user.id, req.user.email, 'User logged out', getClientIp(req));
   res.json({ ok: true });
 });
 
 app.get('/api/me', authMiddleware, (req, res) => {
-  const user = db.users.find(u => u.id === req.user.id);
+  const user = db.prepare('SELECT id, name, email, plan FROM users WHERE id = ?').get(req.user.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
-  res.json({ id: user.id, name: user.name, email: user.email, plan: user.plan });
+  res.json(user);
 });
 
-// ─── ANALYSIS ROUTES ───────────────────────────────────────────
+// ─── ANALYSIS ──────────────────────────────────────────────────
 app.post('/api/analyze', authMiddleware, upload.single('file'), async (req, res) => {
   const ip = getClientIp(req);
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
-  const params = req.body.params ? JSON.parse(req.body.params) : {};
+  const params   = req.body.params ? JSON.parse(req.body.params) : {};
   const fileName = req.file.originalname;
   const filePath = req.file.path;
 
-  const user = db.users.find(u => u.id === req.user.id);
-  if (user) user.analysisCount = (user.analysisCount || 0) + 1;
+  db.prepare('UPDATE users SET analysis_count = analysis_count + 1 WHERE id = ?').run(req.user.id);
 
-  const analysis = {
-    id: db.nextAnalysisId++, userId: req.user.id, name: fileName,
-    status: 'processing', step: 'Queued', pct: 0,
-    createdAt: new Date().toISOString(), params, results: null, summary: null,
-    filePath,
-  };
-  db.analyses.push(analysis);
+  const result = db.prepare(
+    'INSERT INTO analyses (user_id, name, status, step, pct, params, file_path) VALUES (?, ?, ?, ?, ?, ?, ?)'
+  ).run(req.user.id, fileName, 'processing', 'Queued', 0, JSON.stringify(params), filePath);
+
+  const analysisId = result.lastInsertRowid;
   logEvent('analysis', req.user.id, req.user.email, `Analysis started: ${fileName}`, ip);
 
-  // Spawn Python worker
   const callbackUrl = `http://localhost:${PORT}/internal/analysis-callback`;
   const workerPath  = path.join(__dirname, 'analysis_worker.py');
-  const paramsJson  = JSON.stringify(params);
 
-  const child = spawn('python3', [workerPath, String(analysis.id), filePath, paramsJson, callbackUrl], {
+  const child = spawn('python3', [workerPath, String(analysisId), filePath, JSON.stringify(params), callbackUrl], {
     detached: true, stdio: ['ignore', 'pipe', 'pipe'],
   });
 
   child.stdout.on('data', d => console.log('[worker]', d.toString().trim()));
   child.stderr.on('data', d => console.error('[worker]', d.toString().trim()));
   child.on('close', code => {
-    if (code !== 0 && analysis.status !== 'complete') {
-      analysis.status = 'failed';
-      analysis.error  = 'Worker exited with code ' + code;
-      logEvent('analysis_failed', analysis.userId, req.user.email, `Worker exit ${code}`);
+    if (code !== 0) {
+      const a = db.prepare('SELECT status FROM analyses WHERE id = ?').get(analysisId);
+      if (a && a.status !== 'complete') {
+        db.prepare('UPDATE analyses SET status = ?, error = ? WHERE id = ?').run('failed', 'Worker exited with code ' + code, analysisId);
+        logEvent('analysis_failed', req.user.id, req.user.email, `Worker exit ${code}`);
+      }
     }
-    // Clean up temp file
     fs.unlink(filePath, () => {});
   });
 
-  res.json({ analysisId: analysis.id, message: 'Analysis started' });
+  res.json({ analysisId, message: 'Analysis started' });
 });
 
-// Internal callback — called by Python worker
+// Internal callback from Python worker
 app.post('/internal/analysis-callback', express.json({ limit: '200mb' }), (req, res) => {
   const { jobId, status, step, pct, results, error } = req.body;
-  const analysis = db.analyses.find(a => a.id === parseInt(jobId));
+  const analysis = db.prepare('SELECT * FROM analyses WHERE id = ?').get(parseInt(jobId));
   if (!analysis) return res.status(404).json({ error: 'Analysis not found' });
 
   if (status === 'progress') {
-    analysis.step = step || analysis.step;
-    analysis.pct  = pct  || analysis.pct;
+    db.prepare('UPDATE analyses SET step = ?, pct = ? WHERE id = ?').run(step || analysis.step, pct || analysis.pct, analysis.id);
   } else if (status === 'complete') {
-    analysis.status  = 'complete';
-    analysis.pct     = 100;
-    analysis.results = results;
-    // Build summary from real results
-    const eqs = results?.equations || [];
+    const eqs  = results?.equations || [];
     const best = eqs.reduce((a, e) => e.r2 > (a?.r2 || -1) ? e : a, null);
-    analysis.summary = {
-      topGene:    best?.gene   || '—',
-      bestR2:     best?.r2     || 0,
-      stages:     results?.stages?.length || 4,
-      regulators: results?.regulators?.length || 0,
-      equations:  eqs.length,
-    };
-    const u = db.users.find(u => u.id === analysis.userId);
-    logEvent('analysis_done', analysis.userId, u?.email || '', `Analysis complete: ${analysis.name} (${eqs.length} equations)`);
+    const summary = { topGene: best?.gene || '—', bestR2: best?.r2 || 0, stages: results?.stages?.length || 4, regulators: results?.regulators?.length || 0, equations: eqs.length };
+    db.prepare('UPDATE analyses SET status = ?, pct = 100, results = ?, summary = ? WHERE id = ?')
+      .run('complete', JSON.stringify(results), JSON.stringify(summary), analysis.id);
+    const u = db.prepare('SELECT email FROM users WHERE id = ?').get(analysis.user_id);
+    logEvent('analysis_done', analysis.user_id, u?.email || '', `Complete: ${analysis.name} (${eqs.length} equations)`);
   } else if (status === 'failed') {
-    analysis.status = 'failed';
-    analysis.error  = error || 'Unknown error';
-    const u = db.users.find(u => u.id === analysis.userId);
-    logEvent('analysis_failed', analysis.userId, u?.email || '', `Analysis failed: ${error?.slice(0,80)}`);
+    db.prepare('UPDATE analyses SET status = ?, error = ? WHERE id = ?').run('failed', error || 'Unknown error', analysis.id);
+    const u = db.prepare('SELECT email FROM users WHERE id = ?').get(analysis.user_id);
+    logEvent('analysis_failed', analysis.user_id, u?.email || '', `Failed: ${(error||'').slice(0,80)}`);
   }
 
   res.json({ ok: true });
 });
 
 app.get('/api/analyses', authMiddleware, (req, res) => {
-  res.json(db.analyses.filter(a => a.userId === req.user.id).map(a => ({ id: a.id, name: a.name, status: a.status, createdAt: a.createdAt, summary: a.summary })));
+  const rows = db.prepare('SELECT id, name, status, created_at, summary FROM analyses WHERE user_id = ? ORDER BY id DESC').all(req.user.id);
+  res.json(rows.map(r => ({ ...r, summary: r.summary ? JSON.parse(r.summary) : null })));
 });
 
 app.get('/api/analyses/:id/status', authMiddleware, (req, res) => {
-  const a = db.analyses.find(a => a.id === parseInt(req.params.id) && a.userId === req.user.id);
+  const a = db.prepare('SELECT * FROM analyses WHERE id = ? AND user_id = ?').get(parseInt(req.params.id), req.user.id);
   if (!a) return res.status(404).json({ error: 'Not found' });
   res.json({
     status:  a.status,
-    step:    a.step || '',
-    pct:     a.pct  || 0,
+    step:    a.step  || '',
+    pct:     a.pct   || 0,
     error:   a.error || null,
-    results: a.status === 'complete' ? a.results : null,
+    results: a.status === 'complete' ? JSON.parse(a.results || 'null') : null,
   });
 });
 
-app.get('/api/demo-results', (req, res) => res.json(generateDemoResults()));
+app.get('/api/demo-results', (req, res) => res.json(DEMO_RESULTS_STUB));
 
 // ─── ADMIN AUTH ────────────────────────────────────────────────
-app.post('/api/admin/login', async (req, res) => {
+app.post('/api/admin/login', (req, res) => {
   const { email, password } = req.body;
   const ip = getClientIp(req);
   if (email !== ADMIN_EMAIL || password !== ADMIN_PASSWORD) {
@@ -250,128 +273,99 @@ app.post('/api/admin/login', async (req, res) => {
   res.json({ token });
 });
 
-// ─── ADMIN DATA ROUTES ──────────────────────────────────────────
+// ─── ADMIN DATA ────────────────────────────────────────────────
 app.get('/api/admin/stats', adminMiddleware, (req, res) => {
-  const now = Date.now();
-  const today = new Date(); today.setHours(0,0,0,0);
+  const totalUsers     = db.prepare('SELECT COUNT(*) as n FROM users').get().n;
+  const activeUsers    = db.prepare("SELECT COUNT(*) as n FROM users WHERE status='active'").get().n;
+  const suspendedUsers = db.prepare("SELECT COUNT(*) as n FROM users WHERE status='suspended'").get().n;
+  const newToday       = db.prepare("SELECT COUNT(*) as n FROM users WHERE date(created_at)=date('now')").get().n;
+  const activeSessions = db.prepare('SELECT COUNT(*) as n FROM sessions WHERE active=1').get().n;
+  const totalSessions  = db.prepare('SELECT COUNT(*) as n FROM sessions').get().n;
+  const totalLogins    = db.prepare('SELECT COALESCE(SUM(login_count),0) as n FROM users').get().n;
+  const totalAnalyses  = db.prepare('SELECT COUNT(*) as n FROM analyses').get().n;
 
-  const dailySignups  = Array.from({length:14}, (_,i) => {
-    const d = new Date(now-(13-i)*86400000); d.setHours(0,0,0,0);
-    const n = new Date(d.getTime()+86400000);
-    return db.users.filter(u => new Date(u.createdAt)>=d && new Date(u.createdAt)<n).length;
-  });
-  const dailyLogins   = Array.from({length:14}, (_,i) => {
-    const d = new Date(now-(13-i)*86400000); d.setHours(0,0,0,0);
-    const n = new Date(d.getTime()+86400000);
-    return db.events.filter(e => e.type==='login' && new Date(e.at)>=d && new Date(e.at)<n).length;
-  });
-  const dailyAnalyses = Array.from({length:14}, (_,i) => {
-    const d = new Date(now-(13-i)*86400000); d.setHours(0,0,0,0);
-    const n = new Date(d.getTime()+86400000);
-    return db.events.filter(e => e.type==='analysis' && new Date(e.at)>=d && new Date(e.at)<n).length;
-  });
+  const dailySignups  = Array.from({length:14}, (_,i) => db.prepare("SELECT COUNT(*) as n FROM users WHERE date(created_at)=date('now',?)").get(`-${13-i} days`).n);
+  const dailyLogins   = Array.from({length:14}, (_,i) => db.prepare("SELECT COUNT(*) as n FROM events WHERE type='login' AND date(at)=date('now',?)").get(`-${13-i} days`).n);
+  const dailyAnalyses = Array.from({length:14}, (_,i) => db.prepare("SELECT COUNT(*) as n FROM events WHERE type='analysis' AND date(at)=date('now',?)").get(`-${13-i} days`).n);
 
-  res.json({
-    totalUsers:     db.users.length,
-    activeUsers:    db.users.filter(u=>u.status==='active').length,
-    suspendedUsers: db.users.filter(u=>u.status==='suspended').length,
-    newToday:       db.users.filter(u=>new Date(u.createdAt)>=today).length,
-    activeSessions: db.sessions.filter(s=>s.active).length,
-    totalSessions:  db.sessions.length,
-    totalLogins:    db.users.reduce((a,u)=>a+(u.loginCount||0),0),
-    totalAnalyses:  db.analyses.length,
-    dailySignups, dailyLogins, dailyAnalyses,
-  });
+  res.json({ totalUsers, activeUsers, suspendedUsers, newToday, activeSessions, totalSessions, totalLogins, totalAnalyses, dailySignups, dailyLogins, dailyAnalyses });
 });
 
 app.get('/api/admin/users', adminMiddleware, (req, res) => {
-  res.json(db.users.map(u => ({
+  const users = db.prepare('SELECT * FROM users ORDER BY id DESC').all();
+  res.json(users.map(u => ({
     id: u.id, name: u.name, email: u.email, plan: u.plan, status: u.status,
-    createdAt: u.createdAt, lastLogin: u.lastLogin,
-    loginCount: u.loginCount||0, analysisCount: u.analysisCount||0, lastIp: u.lastIp||null,
-    activeSessions: db.sessions.filter(s=>s.userId===u.id&&s.active).length,
+    createdAt: u.created_at, lastLogin: u.last_login,
+    loginCount: u.login_count||0, analysisCount: u.analysis_count||0, lastIp: u.last_ip,
+    activeSessions: db.prepare('SELECT COUNT(*) as n FROM sessions WHERE user_id=? AND active=1').get(u.id).n,
   })));
 });
 
 app.get('/api/admin/users/:id', adminMiddleware, (req, res) => {
-  const user = db.users.find(u=>u.id===parseInt(req.params.id));
-  if (!user) return res.status(404).json({ error: 'User not found' });
+  const user = db.prepare('SELECT * FROM users WHERE id=?').get(parseInt(req.params.id));
+  if (!user) return res.status(404).json({ error: 'Not found' });
   res.json({
     id:user.id, name:user.name, email:user.email, plan:user.plan, status:user.status,
-    createdAt:user.createdAt, lastLogin:user.lastLogin,
-    loginCount:user.loginCount||0, analysisCount:user.analysisCount||0, lastIp:user.lastIp,
-    sessions:  db.sessions.filter(s=>s.userId===user.id),
-    events:    db.events.filter(e=>e.userId===user.id).slice(0,30),
-    analyses:  db.analyses.filter(a=>a.userId===user.id).map(a=>({id:a.id,name:a.name,status:a.status,createdAt:a.createdAt})),
+    createdAt:user.created_at, lastLogin:user.last_login,
+    loginCount:user.login_count||0, analysisCount:user.analysis_count||0, lastIp:user.last_ip,
+    sessions:  db.prepare('SELECT * FROM sessions WHERE user_id=? ORDER BY id DESC LIMIT 20').all(user.id),
+    events:    db.prepare('SELECT * FROM events WHERE user_id=? ORDER BY id DESC LIMIT 30').all(user.id),
+    analyses:  db.prepare('SELECT id,name,status,created_at FROM analyses WHERE user_id=? ORDER BY id DESC').all(user.id),
   });
 });
 
 app.patch('/api/admin/users/:id/status', adminMiddleware, (req, res) => {
-  const user = db.users.find(u=>u.id===parseInt(req.params.id));
+  const user = db.prepare('SELECT * FROM users WHERE id=?').get(parseInt(req.params.id));
   if (!user) return res.status(404).json({ error: 'Not found' });
   const { status } = req.body;
   if (!['active','suspended'].includes(status)) return res.status(400).json({ error: 'Invalid status' });
-  user.status = status;
-  if (status==='suspended') db.sessions.forEach(s=>{if(s.userId===user.id)s.active=false;});
+  db.prepare('UPDATE users SET status=? WHERE id=?').run(status, user.id);
+  if (status==='suspended') db.prepare('UPDATE sessions SET active=0 WHERE user_id=?').run(user.id);
   logEvent(status==='suspended'?'suspend':'reactivate', user.id, user.email, `Admin set status: ${status}`, getClientIp(req));
-  res.json({ ok:true, user:{ id:user.id, status } });
+  res.json({ ok:true });
 });
 
 app.patch('/api/admin/users/:id/plan', adminMiddleware, (req, res) => {
-  const user = db.users.find(u=>u.id===parseInt(req.params.id));
+  const user = db.prepare('SELECT * FROM users WHERE id=?').get(parseInt(req.params.id));
   if (!user) return res.status(404).json({ error: 'Not found' });
   const { plan } = req.body;
   if (!['free','pro','enterprise'].includes(plan)) return res.status(400).json({ error: 'Invalid plan' });
-  user.plan = plan;
+  db.prepare('UPDATE users SET plan=? WHERE id=?').run(plan, user.id);
   logEvent('plan_change', user.id, user.email, `Plan changed to ${plan}`, getClientIp(req));
-  res.json({ ok:true, user:{ id:user.id, plan } });
+  res.json({ ok:true });
 });
 
 app.delete('/api/admin/users/:id', adminMiddleware, (req, res) => {
-  const idx = db.users.findIndex(u=>u.id===parseInt(req.params.id));
-  if (idx===-1) return res.status(404).json({ error: 'Not found' });
-  const user = db.users[idx];
-  db.users.splice(idx, 1);
-  db.sessions.forEach(s=>{if(s.userId===user.id)s.active=false;});
+  const user = db.prepare('SELECT * FROM users WHERE id=?').get(parseInt(req.params.id));
+  if (!user) return res.status(404).json({ error: 'Not found' });
+  db.prepare('UPDATE sessions SET active=0 WHERE user_id=?').run(user.id);
+  db.prepare('DELETE FROM users WHERE id=?').run(user.id);
   logEvent('delete', user.id, user.email, 'User deleted by admin', getClientIp(req));
   res.json({ ok:true });
 });
 
-app.get('/api/admin/sessions', adminMiddleware, (req, res) => res.json(db.sessions.slice(0,100)));
+app.get('/api/admin/sessions', adminMiddleware, (req, res) =>
+  res.json(db.prepare('SELECT * FROM sessions ORDER BY id DESC LIMIT 100').all()));
 
 app.delete('/api/admin/sessions/:id', adminMiddleware, (req, res) => {
-  const s = db.sessions.find(s=>s.id===parseInt(req.params.id));
+  const s = db.prepare('SELECT * FROM sessions WHERE id=?').get(parseInt(req.params.id));
   if (!s) return res.status(404).json({ error: 'Not found' });
-  s.active = false;
-  logEvent('session_terminate', s.userId, s.email, 'Session terminated by admin', getClientIp(req));
+  db.prepare('UPDATE sessions SET active=0 WHERE id=?').run(s.id);
+  logEvent('session_terminate', s.user_id, s.email, 'Session terminated by admin', getClientIp(req));
   res.json({ ok:true });
 });
 
 app.get('/api/admin/events', adminMiddleware, (req, res) => {
   const limit = parseInt(req.query.limit)||100;
-  res.json(db.events.slice(0, limit));
+  res.json(db.prepare('SELECT * FROM events ORDER BY id DESC LIMIT ?').all(limit));
 });
 
-// ─── DEMO DATA ─────────────────────────────────────────────────
-function generateDemoResults() {
-  return {
-    dataset: { cells:3696, genes:2000 },
-    regulators: ['Hmgn3','Gnas','Gnb1','Pdx1','Neurog3','Pax6','Nkx6-1','Arx','Pax4','Snhg6','Sntg1','Chga','Iapp'],
-    equations: [
-      { gene:'Ins2', stage:'Maturation', r2:0.870, r2_train:0.91, complexity:'quartic+exp', color:'#6366f1',
-        equation:'v=Ins2\u2074\u00b7[...]\u00b2', regulatorsFound:['Ins2','Ins1','Sst','Gnas'], interpretation:'Mature \u03b2-cell feedback.' },
-    ],
-    stages: [{id:0,name:'Early Progenitor',cells:924},{id:1,name:'Specification',cells:924},{id:2,name:'Differentiation',cells:924},{id:3,name:'Maturation',cells:924}],
-    perturbations: [{ target:'Ins2', regulator:'Ins2', overexpression:7.31, knockdown:-0.54 }],
-    network: { nodes:[], edges:[] },
-    stageProgression: { Ins2:[{stage:'Early Progenitor',r2:-0.02,complexity:45},{stage:'Specification',r2:0.333,complexity:112},{stage:'Differentiation',r2:0.776,complexity:138},{stage:'Maturation',r2:0.870,complexity:187}] }
-  };
-}
+// ─── Health ────────────────────────────────────────────────────
+app.get('/api/health', (req, res) => res.json({ status:'ok', version:'2.0.0', db:'sqlite' }));
 
-// ─── Health check ──────────────────────────────────────────────
-app.get('/api/health', (req, res) => res.json({ status: 'ok', version: '1.0.0' }));
+const DEMO_RESULTS_STUB = { dataset:{cells:3696,genes:2000}, stages:[{id:0,name:'Early Progenitor',cells:924},{id:1,name:'Specification',cells:924},{id:2,name:'Differentiation',cells:924},{id:3,name:'Maturation',cells:924}], regulators:['Hmgn3','Gnas','Gnb1','Pdx1','Neurog3','Pax6','Nkx6-1','Arx','Pax4','Snhg6','Sntg1','Chga','Iapp'], equations:[], perturbations:[], network:{nodes:[],edges:[]}, stageProgression:{Ins2:[]} };
 
 app.listen(PORT, () => {
-  console.log(`VeloLaw running on http://localhost:${PORT}`);
-  console.log(`Admin email: ${ADMIN_EMAIL}`);
+  console.log(`VeloLaw v2 (SQLite) running on http://localhost:${PORT}`);
+  console.log(`DB: ${DB_PATH}`);
 });
