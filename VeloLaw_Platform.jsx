@@ -158,6 +158,7 @@ const Btn = ({children, onClick, v="primary", size="md", disabled, full, style={
   );
 };
 
+// KEY FIX: Inp defined outside so it never re-mounts on parent re-render
 const Inp = ({label, type="text", value, onChange, placeholder, mono, error}) => (
   <div style={{marginBottom:16}}>
     {label && <label style={{display:"block",fontSize:12,color:T.text2,marginBottom:6,fontWeight:500}}>{label}</label>}
@@ -264,7 +265,7 @@ const LineChart = ({data,h=200}) => {
 const HBar = ({items,maxAbs}) => (
   <div style={{display:"flex",flexDirection:"column",gap:8}}>
     <div style={{display:"grid",gridTemplateColumns:"130px 1fr 1fr",gap:8,fontSize:10,color:T.text3,marginBottom:2}}>
-      <span>Interaction</span><span style={{textAlign:"center"}}>2\u00d7 OE</span><span style={{textAlign:"center"}}>0.5\u00d7 KD</span>
+      <span>Interaction</span><span style={{textAlign:"center"}}>2× OE</span><span style={{textAlign:"center"}}>0.5× KD</span>
     </div>
     {items.map((it,i)=>(
       <div key={i} style={{display:"grid",gridTemplateColumns:"130px 1fr 1fr",gap:8,alignItems:"center"}}>
@@ -292,7 +293,7 @@ const SbItem = ({id,icon,label,active,onClick}) => (
 
 const Empty = ({onLoad}) => (
   <div style={{textAlign:"center",padding:"72px 24px",color:T.text3}}>
-    <div style={{fontSize:40,marginBottom:14}}>\u1f4ca</div>
+    <div style={{fontSize:40,marginBottom:14}}>📊</div>
     <div style={{color:T.text2,fontSize:15,marginBottom:6}}>No results yet</div>
     <div style={{fontSize:13,marginBottom:20}}>Run an analysis or load the demo dataset.</div>
     <Btn v="outline" onClick={onLoad}>Load demo data</Btn>
@@ -311,6 +312,10 @@ export default function VeloLaw() {
   const [authMode, setAuthMode] = useState("login");
   const [user, setUser]         = useState(null);
   const [token, setToken]       = useState(() => localStorage.getItem("vl_token") || "");
+  // auth form state lives inside Auth component now — these are only for legacy compat
+  const [aName, setAName]   = useState("");
+  const [aEmail, setAEmail] = useState("");
+  const [aPw, setAPw]       = useState("");
   const [tab, setTab]           = useState("upload");
   const [results, setResults]   = useState(null);
   const [history, setHistory]   = useState([]);
@@ -352,12 +357,14 @@ export default function VeloLaw() {
 
   const authHeaders = () => ({ "Authorization": `Bearer ${token}`, "Content-Type": "application/json" });
 
+  // ── Auth ──────────────────────────────────────────────────
   const doLogout = async () => {
     try { await fetch(`${API}/api/logout`, { method:"POST", headers:authHeaders() }); } catch {}
     localStorage.removeItem("vl_token"); localStorage.removeItem("vl_user");
     setUser(null); setToken(""); setResults(null); setPage("landing"); pop("Signed out");
   };
 
+  // ── Analysis ─────────────────────────────────────────────
   const sleep = ms => new Promise(r=>setTimeout(r,ms));
 
   const runDemoAnalysis = async () => {
@@ -375,20 +382,30 @@ export default function VeloLaw() {
   const runRealAnalysis = async () => {
     if (!file) { pop("Please upload a .h5ad or .loom file first","err"); return; }
     setAnalyzing(true); setProg({steps:[],pct:0,step:"Uploading file..."});
+
     const fd = new FormData();
     fd.append("file", file);
     fd.append("params", JSON.stringify(params));
+
     try {
-      const r = await fetch(`${API}/api/analyze`, { method:"POST", headers:{ "Authorization": `Bearer ${token}` }, body: fd });
+      const r = await fetch(`${API}/api/analyze`, {
+        method:"POST",
+        headers:{ "Authorization": `Bearer ${token}` },
+        body: fd,
+      });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "Upload failed");
+
       const aId = d.analysisId;
       setAnalysisId(aId);
       setProg(p=>({...p,steps:["File uploaded successfully"],pct:5,step:"Queued for processing"}));
+
+      // Poll for status
       pollRef.current = setInterval(async () => {
         try {
           const sr = await fetch(`${API}/api/analyses/${aId}/status`, { headers:authHeaders() });
           const sd = await sr.json();
+
           if (sd.status === "complete") {
             clearInterval(pollRef.current);
             setResults(sd.results || DEMO_RESULTS);
@@ -399,15 +416,39 @@ export default function VeloLaw() {
             setAnalyzing(false);
             pop("Analysis failed: " + (sd.error || "Unknown error"), "err");
           } else {
-            setProg(p=>({ steps: sd.step && !p.steps.includes(sd.step) ? [...p.steps, sd.step] : p.steps, pct: sd.pct || p.pct, step: sd.step || p.step }));
+            // progress
+            setProg(p=>({
+              steps: sd.step && !p.steps.includes(sd.step) ? [...p.steps, sd.step] : p.steps,
+              pct: sd.pct || p.pct,
+              step: sd.step || p.step
+            }));
           }
         } catch {}
       }, 2000);
-    } catch(e) { setAnalyzing(false); pop("Error: " + e.message, "err"); }
+
+    } catch(e) {
+      setAnalyzing(false);
+      pop("Error: " + e.message, "err");
+    }
   };
 
   const runAnalysis = () => mode === "demo" ? runDemoAnalysis() : runRealAnalysis();
 
+  // Load history from API on dashboard open
+  useEffect(() => {
+    if (page === "dashboard" && token) {
+      fetch(`${API}/api/analyses`, { headers:authHeaders() })
+        .then(r=>r.json())
+        .then(data => {
+          if (Array.isArray(data)) setHistory(data.map(a=>({id:a.id,name:a.name,status:a.status,date:a.created_at})));
+        }).catch(()=>{});
+    }
+  }, [page]);
+
+  // Cleanup poll on unmount
+  useEffect(() => () => { if(pollRef.current) clearInterval(pollRef.current); }, []);
+
+  // ── AI ───────────────────────────────────────────────────
   const genAI = async () => {
     if (!groqKey.trim()) { setAiErr("Enter your Groq key"); return; }
     if (!results) { setAiErr("No results to analyze"); return; }
@@ -448,22 +489,23 @@ export default function VeloLaw() {
     a.download="velolaw_results.csv"; a.click(); pop("CSV exported");
   };
 
+  // ── TABS ────────────────────────────────────────────────
   const Upload = () => (
     <div style={{padding:"24px 28px",maxWidth:860}}>
       <h2 style={{fontFamily:"'Syne',sans-serif",fontSize:24,fontWeight:700,marginBottom:4,color:T.text}}>New Analysis</h2>
       <p style={{color:T.text2,fontSize:13,marginBottom:22,lineHeight:1.6}}>Upload scRNA-seq data or use the demo dataset to discover stage-specific regulatory equations via hierarchical symbolic regression.</p>
       <div style={{display:"flex",gap:10,marginBottom:18}}>
-        {[["demo","\ud83e\uddea","Demo (Pancreatic)"],["real","\u2697","Upload .h5ad / .loom"]].map(([m,ic,lb])=>(
+        {[["demo","🧪","Demo (Pancreatic)"],["real","⚗","Upload .h5ad / .loom"]].map(([m,ic,lb])=>(
           <Btn key={m} v={mode===m?"primary":"secondary"} size="sm" onClick={()=>setMode(m)}>{ic} {lb}</Btn>
         ))}
       </div>
       {mode==="demo" ? (
         <Card style={{padding:18,marginBottom:18,border:`1px solid rgba(74,222,128,.25)`,background:"rgba(74,222,128,.03)"}}>
           <div style={{display:"flex",gap:14,alignItems:"flex-start"}}>
-            <span style={{fontSize:28,flexShrink:0}}>\ud83e\uddea</span>
+            <span style={{fontSize:28,flexShrink:0}}>🧪</span>
             <div>
               <div style={{fontWeight:600,fontSize:15,marginBottom:3,color:T.text}}>Mouse Pancreatic Endocrine Development</div>
-              <div style={{fontSize:12,color:T.text2,marginBottom:8}}>Bastidas-Ponce et al. 2019 \u00b7 3,696 cells \u00b7 2,000 genes \u00b7 scVelo dynamical model</div>
+              <div style={{fontSize:12,color:T.text2,marginBottom:8}}>Bastidas-Ponce et al. 2019 · 3,696 cells · 2,000 genes · scVelo dynamical model</div>
               <p style={{fontSize:12,color:T.text2,lineHeight:1.65}}>Real results from the hierarchical symbolic regression notebook. All equations, perturbation predictions, and network are exact values from the published analysis.</p>
               <div style={{display:"flex",gap:7,marginTop:10,flexWrap:"wrap"}}>
                 {["3,696 cells","2,000 genes","13 regulators","4 stages","6 equations"].map(t=><Tag key={t}>{t}</Tag>)}
@@ -474,25 +516,25 @@ export default function VeloLaw() {
       ) : (
         <>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:14}}>
-            {[["\ud83e\uddec",".h5ad / .loom","AnnData with spliced & unspliced mRNA layers","file-h5ad",".h5ad,.loom"],
-              ["\ud83d\udcca","Regulator CSV (opt.)","Pre-extracted expression matrix","file-csv",".csv,.tsv"]
+            {[["🧬",".h5ad / .loom","AnnData with spliced & unspliced mRNA layers","file-h5ad",".h5ad,.loom"],
+              ["📊","Regulator CSV (opt.)","Pre-extracted expression matrix","file-csv",".csv,.tsv"]
             ].map(([ic,ti,de,id,ac])=>(
               <label key={id} style={{border:`2px dashed ${file&&id==="file-h5ad"?T.accent:T.border2}`,borderRadius:12,padding:26,textAlign:"center",cursor:"pointer",background:T.surface,display:"block",transition:"all .2s"}}>
                 <input type="file" accept={ac} style={{display:"none"}} onChange={e=>{if(id==="file-h5ad")setFile(e.target.files[0]);}}/>
                 <div style={{fontSize:30,marginBottom:8,opacity:.5}}>{ic}</div>
                 <div style={{fontWeight:600,fontSize:13,marginBottom:3,color:T.text}}>{ti}</div>
                 <div style={{fontSize:11,color:T.text3}}>{de}</div>
-                {file&&id==="file-h5ad"&&<div style={{marginTop:8,fontSize:11,color:T.accent}}>\u2713 {file.name} ({(file.size/1024/1024).toFixed(1)} MB)</div>}
+                {file&&id==="file-h5ad"&&<div style={{marginTop:8,fontSize:11,color:T.accent}}>✓ {file.name} ({(file.size/1024/1024).toFixed(1)} MB)</div>}
               </label>
             ))}
           </div>
-          {!token && <div style={{background:"rgba(251,191,36,.1)",border:`1px solid rgba(251,191,36,.3)`,color:T.warn,padding:"10px 14px",borderRadius:8,fontSize:13,marginBottom:14}}>\u26a0 You must be signed in to run a real analysis.</div>}
+          {!token && <div style={{background:"rgba(251,191,36,.1)",border:`1px solid rgba(251,191,36,.3)`,color:T.warn,padding:"10px 14px",borderRadius:8,fontSize:13,marginBottom:14}}>⚠ You must be signed in to run a real analysis.</div>}
         </>
       )}
       <Card style={{padding:18,marginBottom:18}}>
-        <div style={{fontWeight:600,fontSize:13,marginBottom:14,color:T.text}}>\u2699 Analysis Parameters</div>
+        <div style={{fontWeight:600,fontSize:13,marginBottom:14,color:T.text}}>⚙ Analysis Parameters</div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:11,marginBottom:11}}>
-          {[["Stages (K)","stages",2,8,1],["Parsimony (\u03bb)","parsimony",.001,.1,.001],["Populations","populations",5,50,1],["Iterations","iterations",20,500,1],["Max eq. size","maxSize",10,50,1],["CV folds","folds",2,10,1]].map(([lb,k,mn,mx,st])=>(
+          {[["Stages (K)","stages",2,8,1],["Parsimony (λ)","parsimony",.001,.1,.001],["Populations","populations",5,50,1],["Iterations","iterations",20,500,1],["Max eq. size","maxSize",10,50,1],["CV folds","folds",2,10,1]].map(([lb,k,mn,mx,st])=>(
             <div key={k}>
               <label style={{display:"block",fontSize:11,color:T.text2,marginBottom:4,fontWeight:500}}>{lb}</label>
               <input type="number" value={params[k]} min={mn} max={mx} step={st} onChange={e=>setParams(p=>({...p,[k]:+e.target.value}))} className="vl-inp"
@@ -506,7 +548,7 @@ export default function VeloLaw() {
             style={{width:"100%",background:T.surface2,border:`1px solid ${T.border2}`,color:T.text,padding:"9px 12px",borderRadius:8,fontSize:13}}/>
         </div>
       </Card>
-      <Btn size="lg" onClick={runAnalysis} disabled={analyzing}>{analyzing?<><Spinner size={14}/> Analyzing\u2026</>:"\u25b6 Run Analysis"}</Btn>
+      <Btn size="lg" onClick={runAnalysis} disabled={analyzing}>{analyzing?<><Spinner size={14}/> Analyzing…</>:"▶ Run Analysis"}</Btn>
       {analyzing && (
         <Card style={{padding:18,marginTop:18}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
@@ -517,7 +559,7 @@ export default function VeloLaw() {
           <div style={{maxHeight:160,overflowY:"auto",display:"flex",flexDirection:"column",gap:4,marginBottom:12}}>
             {prog.steps.map((s,i)=>(
               <div key={i} style={{display:"flex",gap:8,fontSize:12,color:T.accent,animation:"fadeUp .2s ease"}}>
-                <span>\u2713</span><span>{s}</span>
+                <span>✓</span><span>{s}</span>
               </div>
             ))}
           </div>
@@ -534,21 +576,21 @@ export default function VeloLaw() {
     if (!results) return <Empty onLoad={()=>{setMode("demo");runDemoAnalysis();}}/>;
     const good=results.equations.filter(e=>e.r2>=0.3);
     const best=results.equations.reduce((a,b)=>a.r2>b.r2?a:b);
-    const r2data={labels:["Early","Spec.","Diff.","Mature"],datasets:results.equations.reduce((acc,eq)=>{const si=["Early Progenitor","Specification","Differentiation","Maturation"].indexOf(eq.stage);const ex=acc.find(d=>d.label===eq.gene);if(ex){if(si>=0)ex.data[si]=Math.max(0,eq.r2);}else{const d=Array(4).fill(null);if(si>=0)d[si]=Math.max(0,eq.r2);acc.push({label:eq.gene,data:d,color:eq.color});}return acc;},[])};
+    const r2data={labels:["Early","Spec.","Diff.","Mature"],datasets:results.equations.reduce((acc,eq)=>{const si=["Early Progenitor","Specification","Differentiation","Maturation"].indexOf(eq.stage);const ex=acc.find(d=>d.label===eq.gene);if(ex){if(si>=0)ex.data[si]=Math.max(0,eq.r2);}else{const d=Array(4).fill(null);if(si>=0)d[si]=Math.max(0,eq.r2);acc.push({label:eq.gene,data:d,color:eq.color});}return acc;},{})};
     const progdata={labels:results.stageProgression?.Ins2?.map(p=>p.stage)||[],datasets:[{label:"Fit Ins2",data:results.stageProgression?.Ins2?.map(p=>Math.max(0,p.r2))||[],color:T.accent},{label:"Complexity/200",data:results.stageProgression?.Ins2?.map(p=>p.complexity/200)||[],color:T.accent3,dash:"4,2"}]};
     return (
       <div style={{padding:"22px 28px"}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:18}}>
           <h2 style={{fontFamily:"'Syne',sans-serif",fontSize:23,fontWeight:700,color:T.text}}>Analysis Results</h2>
           <div style={{display:"flex",gap:8}}>
-            <Btn v="secondary" size="sm" onClick={exportLatex}>\ud83d\udcc4 LaTeX</Btn>
-            <Btn v="secondary" size="sm" onClick={exportCSV}>\u2b07 CSV</Btn>
+            <Btn v="secondary" size="sm" onClick={exportLatex}>📄 LaTeX</Btn>
+            <Btn v="secondary" size="sm" onClick={exportCSV}>⬇ CSV</Btn>
           </div>
         </div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:11,marginBottom:18}}>
           <Metric value={results.dataset.cells.toLocaleString()} label="Total cells" sub={results.dataset.genes.toLocaleString()+" genes"} color={T.accent}/>
-          <Metric value={`${good.length}/${results.equations.length}`} label="Strong models" sub="gene \u00d7 stage" color={T.accent2}/>
-          <Metric value={best.gene+" \u00b7 "+best.stage} label="Best equation" sub="highest model fit" color={T.accent3}/>
+          <Metric value={`${good.length}/${results.equations.length}`} label="Strong models" sub="gene × stage" color={T.accent2}/>
+          <Metric value={best.gene+" · "+best.stage} label="Best equation" sub="highest model fit" color={T.accent3}/>
           <Metric value={results.regulators.length} label="Regulators" sub="tested across stages" color={T.warn}/>
         </div>
         <div style={{fontSize:12,fontWeight:600,color:T.text2,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.07em"}}>Developmental stages</div>
@@ -587,7 +629,7 @@ export default function VeloLaw() {
                 {opts.map(o=><option key={o}>{o}</option>)}
               </select>
             ))}
-            <Btn v="secondary" size="sm" onClick={exportLatex}>\ud83d\udcc4 LaTeX</Btn>
+            <Btn v="secondary" size="sm" onClick={exportLatex}>📄 LaTeX</Btn>
           </div>
         </div>
         <div style={{display:"flex",flexDirection:"column",gap:11}}>
@@ -602,7 +644,7 @@ export default function VeloLaw() {
                 <div style={{display:"flex",alignItems:"center",gap:9}}>
                   <ModelBadge r2={eq.r2}/>
                   <span style={{color:T.text3,fontSize:11}}>{eq.complexity}</span>
-                  <span style={{color:T.text3,fontSize:11,transform:openEqs[i]?"rotate(180deg)":"none",display:"inline-block",transition:"transform .2s"}}>\u25bc</span>
+                  <span style={{color:T.text3,fontSize:11,transform:openEqs[i]?"rotate(180deg)":"none",display:"inline-block",transition:"transform .2s"}}>▼</span>
                 </div>
               </div>
               {openEqs[i] && (
@@ -621,6 +663,7 @@ export default function VeloLaw() {
               )}
             </Card>
           ))}
+          {eqs.length===0 && <div style={{textAlign:"center",padding:"40px 0",color:T.text3,fontSize:13}}>No equations match this filter.</div>}
         </div>
       </div>
     );
@@ -638,12 +681,29 @@ export default function VeloLaw() {
           </select>
         </div>
         <Card style={{padding:17,marginBottom:14}}>
-          <div style={{fontSize:13,fontWeight:600,marginBottom:3,color:T.text}}>Gene Regulatory Network <span style={{fontSize:11,color:T.text3,fontWeight:400}}>\u2014 drag nodes to explore</span></div>
+          <div style={{fontSize:13,fontWeight:600,marginBottom:3,color:T.text}}>Gene Regulatory Network <span style={{fontSize:11,color:T.text3,fontWeight:400}}>— drag nodes to explore</span></div>
           <div style={{fontSize:11,color:T.text3,marginBottom:11}}>Edges extracted from discovered equations. Directionality inferred from equation structure.</div>
           <NetCanvas data={results.network} stageFilter={netStage}/>
           <div style={{display:"flex",gap:18,marginTop:11,flexWrap:"wrap"}}>
-            {[["#4ade80","Activation"],["#f87171","Repression"],["#fbbf24","Modulation"],["#a78bfa","Target gene (\u25c7)"],["#38bdf8","Regulator (\u25cf)"]].map(([c,l])=>(
+            {[["#4ade80","Activation"],["#f87171","Repression"],["#fbbf24","Modulation"],["#a78bfa","Target gene (◇)"],["#38bdf8","Regulator (●)"]].map(([c,l])=>(
               <div key={l} style={{display:"flex",alignItems:"center",gap:5,fontSize:12,color:T.text2}}><div style={{width:8,height:8,borderRadius:"50%",background:c}}/>{l}</div>
+            ))}
+          </div>
+        </Card>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:9,marginBottom:14}}>
+          {[[results.network.nodes.length,"Total nodes"],[results.network.nodes.filter(n=>n.type==="target").length,"Targets"],[results.network.nodes.filter(n=>n.type==="regulator").length,"Regulators"],[filtered.length,"Edges shown"]].map(([v,l])=>(<Metric key={l} value={v} label={l}/>))}
+        </div>
+        <Card style={{padding:17}}>
+          <div style={{fontSize:13,fontWeight:600,marginBottom:11,color:T.text}}>Edge detail</div>
+          <div style={{display:"flex",flexDirection:"column",gap:5}}>
+            {filtered.map((e,i)=>(
+              <div key={i} style={{display:"flex",alignItems:"center",gap:10,fontSize:12,padding:"6px 10px",background:T.surface2,borderRadius:7}}>
+                <span style={{color:T.accent2,fontFamily:"'JetBrains Mono',monospace",minWidth:60}}>{e.source}</span>
+                <span style={{color:{activate:T.accent,repress:T.danger,modulate:T.warn}[e.type],fontSize:16}}>{e.type==="activate"?"\u2192":e.type==="repress"?"\u22a3":"~"}</span>
+                <span style={{color:T.accent3,fontFamily:"'JetBrains Mono',monospace",minWidth:50}}>{e.target}</span>
+                <Tag style={{marginLeft:"auto"}}>{e.stage}</Tag>
+                <span style={{color:{activate:T.accent,repress:T.danger,modulate:T.warn}[e.type],fontSize:11}}>{e.type}</span>
+              </div>
             ))}
           </div>
         </Card>
@@ -661,7 +721,13 @@ export default function VeloLaw() {
       <div style={{padding:"22px 28px"}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:18}}>
           <h2 style={{fontFamily:"'Syne',sans-serif",fontSize:23,fontWeight:700,color:T.text}}>In Silico Perturbation</h2>
-          <Tag>2\u00d7 overexpression \u00b7 0.5\u00d7 knockdown</Tag>
+          <Tag>2× overexpression · 0.5× knockdown</Tag>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:11,marginBottom:18}}>
+          <Metric value="+7.31 Δv" label="Largest activation" sub="Ins2 self-OE" color={T.accent}/>
+          <Metric value="−28.41 Δv" label="Strongest repression" sub="Gnas → Ghrl" color={T.danger}/>
+          <Metric value={pb.filter(p=>p.overexpression>0).length} label="Activating OEs" color={T.accent2}/>
+          <Metric value={pb.filter(p=>p.overexpression<0).length} label="Repressive OEs" color={T.warn}/>
         </div>
         <Card style={{padding:17,marginBottom:14}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14,fontSize:13,fontWeight:600,color:T.text}}>
@@ -671,7 +737,7 @@ export default function VeloLaw() {
               {genes.map(g=><option key={g}>{g}</option>)}
             </select>
           </div>
-          <HBar items={pb.map(p=>({label:`${p.target} \u2190 ${p.regulator}`,oe:p.overexpression,kd:p.knockdown}))} maxAbs={maxAbs}/>
+          <HBar items={pb.map(p=>({label:`${p.target} ← ${p.regulator}`,oe:p.overexpression,kd:p.knockdown}))} maxAbs={maxAbs}/>
         </Card>
       </div>
     );
@@ -684,23 +750,43 @@ export default function VeloLaw() {
       <div style={{padding:"22px 28px"}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:18}}>
           <h2 style={{fontFamily:"'Syne',sans-serif",fontSize:23,fontWeight:700,color:T.text}}>AI Biological Insights</h2>
-          <Tag>Groq \u00b7 LLaMA 3.3 70B</Tag>
+          <Tag>Groq · LLaMA 3.3 70B</Tag>
         </div>
         <Card style={{padding:20,marginBottom:14,position:"relative",overflow:"hidden"}}>
           <div style={{position:"absolute",top:0,left:0,right:0,height:1,background:`linear-gradient(90deg,transparent,${T.accent3},transparent)`}}/>
           <div style={{display:"flex",alignItems:"flex-start",gap:12,marginBottom:14}}>
-            <div style={{width:36,height:36,background:`linear-gradient(135deg,${T.accent3},${T.accent2})`,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:19,flexShrink:0}}>\ud83e\udd16</div>
+            <div style={{width:36,height:36,background:`linear-gradient(135deg,${T.accent3},${T.accent2})`,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:19,flexShrink:0}}>🤖</div>
             <div>
               <div style={{fontWeight:600,fontSize:15,marginBottom:2,color:T.text}}>AI Regulatory Interpretation</div>
-              <div style={{fontSize:12,color:T.text2}}>Powered by Groq \u2014 get free key at <span style={{color:T.accent2}}>console.groq.com</span></div>
+              <div style={{fontSize:12,color:T.text2}}>Powered by Groq — get free key at <span style={{color:T.accent2}}>console.groq.com</span></div>
             </div>
           </div>
           <div style={{display:"flex",gap:8,marginBottom:10}}>
             <input type="password" value={groqKey} onChange={e=>setGroqKey(e.target.value)} placeholder="gsk_xxxxxxxxxxxxxxxxxxxxxxxx" className="vl-inp"
               style={{flex:1,background:T.bg,border:`1px solid ${T.border2}`,color:T.text,padding:"9px 12px",borderRadius:8,fontFamily:"'JetBrains Mono',monospace",fontSize:12}}/>
-            <Btn v="outline" onClick={genAI} disabled={aiLoad}>{aiLoad?"Generating\u2026":"Generate insights"}</Btn>
+            <Btn v="outline" onClick={genAI} disabled={aiLoad}>{aiLoad?"Generating…":"Generate insights"}</Btn>
           </div>
+          {aiErr && <div style={{color:T.danger,fontSize:12,marginBottom:9,lineHeight:1.5}}>{aiErr}</div>}
+          {aiLoad && <div style={{display:"flex",alignItems:"center",gap:9,color:T.accent3,fontSize:13}}><Spinner size={15} color={T.accent3}/> Analyzing with LLaMA 3.3 70B…</div>}
           {aiOut && <div style={{fontSize:13,color:T.text,lineHeight:1.8,background:T.surface2,borderRadius:10,padding:15,marginTop:8}} dangerouslySetInnerHTML={{__html:aiOut.replace(/\*\*(.+?)\*\*/g,"<strong style='color:#f0f2f8'>$1</strong>").replace(/\n\n/g,"<br/><br/>")}}/>}
+        </Card>
+        <Card style={{padding:18}}>
+          <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14}}>
+            <div style={{width:34,height:34,background:"linear-gradient(135deg,#f59e0b,#ef4444)",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>💡</div>
+            <div><div style={{fontWeight:600,color:T.text}}>Auto-generated Summaries</div><div style={{fontSize:12,color:T.text2}}>Extracted from equation structure — no API key needed</div></div>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+            {good.map((eq,i)=>(
+              <div key={i} style={{background:T.surface2,border:`1px solid ${T.border}`,borderRadius:10,padding:13}}>
+                <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:7}}>
+                  <div style={{width:8,height:8,borderRadius:"50%",background:eq.color,flexShrink:0}}/>
+                  <span style={{fontWeight:600,fontSize:13,color:T.text}}>{eq.gene} · {eq.stage}</span>
+                </div>
+                <div style={{fontSize:12,color:T.text2,lineHeight:1.65,marginBottom:7}}>{eq.interpretation}</div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:4}}>{eq.regulatorsFound.map(r=><Tag key={r} style={{fontSize:10}}>{r}</Tag>)}</div>
+              </div>
+            ))}
+          </div>
         </Card>
       </div>
     );
@@ -709,34 +795,72 @@ export default function VeloLaw() {
   const History = () => (
     <div style={{padding:"22px 28px"}}>
       <h2 style={{fontFamily:"'Syne',sans-serif",fontSize:23,fontWeight:700,marginBottom:18,color:T.text}}>Analysis History</h2>
-      <table style={{width:"100%",borderCollapse:"collapse"}}>
-        <thead><tr style={{borderBottom:`1px solid ${T.border}`}}>
-          {["Name","Status","Date",""].map(h=><th key={h} style={{textAlign:"left",fontSize:11,textTransform:"uppercase",letterSpacing:"0.07em",color:T.text3,padding:"8px 11px",fontWeight:500}}>{h}</th>)}
-        </tr></thead>
-        <tbody>{history.map(a=>(
-          <tr key={a.id} style={{borderBottom:`1px solid ${T.border}`}}>
-            <td style={{padding:"11px",fontSize:13,color:T.text}}>{a.name}</td>
-            <td style={{padding:"11px"}}><span style={{background:"rgba(74,222,128,.15)",color:T.accent,padding:"2px 9px",borderRadius:100,fontSize:11,fontWeight:700}}>{a.status}</span></td>
-            <td style={{padding:"11px",fontSize:12,color:T.text2}}>{new Date(a.date||a.created_at).toLocaleDateString()}</td>
-            <td style={{padding:"11px"}}><Btn v="secondary" size="sm" onClick={()=>{setResults(DEMO_RESULTS);setTab("results");pop("Results loaded");}}>Load</Btn></td>
-          </tr>
-        ))}</tbody>
-      </table>
+      {history.length===0 ? (
+        <div style={{textAlign:"center",padding:"56px 0",color:T.text3}}>
+          <div style={{fontSize:32,marginBottom:10}}>📋</div>
+          <div style={{color:T.text2,fontSize:14,marginBottom:6}}>No analyses yet</div>
+          <div style={{fontSize:13}}>Your completed analyses will appear here.</div>
+        </div>
+      ) : (
+        <table style={{width:"100%",borderCollapse:"collapse"}}>
+          <thead><tr style={{borderBottom:`1px solid ${T.border}`}}>
+            {["Name","Status","Date",""].map(h=><th key={h} style={{textAlign:"left",fontSize:11,textTransform:"uppercase",letterSpacing:"0.07em",color:T.text3,padding:"8px 11px",fontWeight:500}}>{h}</th>)}
+          </tr></thead>
+          <tbody>{history.map(a=>(
+            <tr key={a.id} style={{borderBottom:`1px solid ${T.border}`}}>
+              <td style={{padding:"11px",fontSize:13,color:T.text}}>{a.name}</td>
+              <td style={{padding:"11px"}}><span style={{background:"rgba(74,222,128,.15)",color:T.accent,padding:"2px 9px",borderRadius:100,fontSize:11,fontWeight:700}}>{a.status}</span></td>
+              <td style={{padding:"11px",fontSize:12,color:T.text2}}>{new Date(a.date||a.created_at).toLocaleDateString()}</td>
+              <td style={{padding:"11px"}}><Btn v="secondary" size="sm" onClick={()=>{setResults(DEMO_RESULTS);setTab("results");pop("Results loaded");}}>Load</Btn></td>
+            </tr>
+          ))}</tbody>
+        </table>
+      )}
     </div>
   );
 
+  // ── PAGES ────────────────────────────────────────────────
   const Landing = () => (
     <div style={{minHeight:"100vh",background:T.bg}}>
       <nav style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"16px 32px",borderBottom:`1px solid ${T.border}`,background:"rgba(7,9,14,.95)",backdropFilter:"blur(14px)",position:"sticky",top:0,zIndex:100}}>
-        <div style={{fontFamily:"'Syne',sans-serif",fontSize:21,fontWeight:800,color:T.accent,letterSpacing:"-0.03em"}}>\u2b21 VeloLaw <span style={{color:T.text3,fontSize:10,fontFamily:"'JetBrains Mono',monospace",fontWeight:400}}>beta</span></div>
+        <div style={{fontFamily:"'Syne',sans-serif",fontSize:21,fontWeight:800,color:T.accent,letterSpacing:"-0.03em"}}>⬡ VeloLaw <span style={{color:T.text3,fontSize:10,fontFamily:"'JetBrains Mono',monospace",fontWeight:400}}>beta</span></div>
         <div style={{display:"flex",gap:10}}>
           <Btn v="secondary" onClick={()=>{setAuthMode("login");setPage("auth");}}>Sign in</Btn>
           <Btn onClick={()=>{setAuthMode("register");setPage("auth");}}>Get started free</Btn>
         </div>
       </nav>
       <div style={{padding:"80px 24px 60px",maxWidth:1000,margin:"0 auto",textAlign:"center"}}>
-        <h1 style={{fontFamily:"'Syne',sans-serif",fontSize:"clamp(2.4rem,5vw,4rem)",lineHeight:1.08,letterSpacing:"-0.04em",marginBottom:24,fontWeight:800,color:T.text}}>Discover <em style={{color:T.accent,fontStyle:"italic"}}>why</em> genes change,<br/>not just how</h1>
-        <Btn size="lg" onClick={()=>{setAuthMode("register");setPage("auth");}}>\u25b6 Start free analysis</Btn>
+        <div style={{display:"inline-flex",alignItems:"center",gap:8,background:"rgba(74,222,128,.08)",border:`1px solid rgba(74,222,128,.2)`,color:T.accent,padding:"5px 18px",borderRadius:100,fontSize:11,fontFamily:"'JetBrains Mono',monospace",letterSpacing:"0.05em",marginBottom:32}}>
+          <span style={{width:6,height:6,background:T.accent,borderRadius:"50%",animation:"pulse 2s infinite",display:"inline-block"}}/>
+          RNA Velocity · Symbolic Regression · Interpretable AI
+        </div>
+        <h1 style={{fontFamily:"'Syne',sans-serif",fontSize:"clamp(2.4rem,5vw,4rem)",lineHeight:1.08,letterSpacing:"-0.04em",marginBottom:24,fontWeight:800,color:T.text}}>
+          Discover <em style={{color:T.accent,fontStyle:"italic"}}>why</em> genes change,<br/>not just how
+        </h1>
+        <p style={{fontSize:17,color:T.text2,maxWidth:540,margin:"0 auto 36px",lineHeight:1.7}}>VeloLaw turns RNA velocity data into explicit, readable regulatory equations — so you can understand, validate, and act on the biology.</p>
+        <div style={{display:"flex",gap:14,justifyContent:"center",flexWrap:"wrap"}}>
+          <Btn size="lg" onClick={()=>{setAuthMode("register");setPage("auth");}}>▶ Start free analysis</Btn>
+          <Btn v="secondary" size="lg" onClick={()=>{setAuthMode("register");setPage("auth");}}>📊 View demo results</Btn>
+        </div>
+      </div>
+      <div style={{padding:"48px 24px 80px",maxWidth:1040,margin:"0 auto"}}>
+        <div style={{fontFamily:"'JetBrains Mono',monospace",fontSize:10,color:T.accent,letterSpacing:"0.15em",textTransform:"uppercase",marginBottom:6}}>Platform capabilities</div>
+        <h2 style={{fontFamily:"'Syne',sans-serif",fontSize:28,letterSpacing:"-0.03em",marginBottom:28,fontWeight:700,color:T.text}}>Everything from RNA velocity to mechanism</h2>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:16}}>
+          {[["🧬","RNA Velocity Estimation","scVelo dynamical model recovers kinetic parameters and pseudotime from spliced/unspliced counts.","rgba(74,222,128,.08)"],
+            ["⚡","Hierarchical Symbolic Regression","PySR genetic programming discovers stage-specific equations with biologically-constrained operators.","rgba(56,189,248,.08)"],
+            ["🔬","In Silico Perturbation","Predict overexpression and knockdown effects on velocity before wet lab experiments.","rgba(167,139,250,.08)"],
+            ["🕸","Regulatory Network","Interactive GRN with stage-specific edges, activation/repression directionality, drag-to-explore canvas.","rgba(251,191,36,.08)"],
+            ["🤖","AI Biological Interpretation","Groq LLaMA 3.3 70B analyzes equations and recommends experimental validations and drug targets.","rgba(249,115,22,.08)"],
+            ["📄","LaTeX & CSV Export","Every equation formatted for direct manuscript inclusion. Copy-paste into bioRxiv preprint.","rgba(248,113,113,.08)"],
+          ].map(([ic,ti,de,bg])=>(
+            <Card key={ti} style={{padding:22}}>
+              <div style={{width:38,height:38,borderRadius:10,background:bg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,marginBottom:13}}>{ic}</div>
+              <div style={{fontWeight:700,fontSize:14,marginBottom:6,color:T.text}}>{ti}</div>
+              <div style={{fontSize:13,color:T.text2,lineHeight:1.65}}>{de}</div>
+            </Card>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -748,26 +872,59 @@ export default function VeloLaw() {
     const [pw, setPw]           = useState("");
     const [err, setErr]         = useState("");
     const [loading, setLoading] = useState(false);
-    const login = async () => { setErr(""); setLoading(true); try { const r = await fetch(`${API}/api/login`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({email, password:pw}) }); const d = await r.json(); if (!r.ok) throw new Error(d.error || "Login failed"); onSuccess(d.token, d.user); } catch(e) { setErr(e.message); } setLoading(false); };
-    const register = async () => { setErr(""); setLoading(true); try { const r = await fetch(`${API}/api/register`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({name, email, password:pw}) }); const d = await r.json(); if (!r.ok) throw new Error(d.error || "Registration failed"); onSuccess(d.token, d.user); } catch(e) { setErr(e.message); } setLoading(false); };
+
+    const login = async () => {
+      setErr(""); setLoading(true);
+      try {
+        const r = await fetch(`${API}/api/login`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({email, password:pw}) });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || "Login failed");
+        onSuccess(d.token, d.user);
+      } catch(e) { setErr(e.message); }
+      setLoading(false);
+    };
+
+    const register = async () => {
+      setErr(""); setLoading(true);
+      if (!name||!email||!pw) { setErr("All fields required"); setLoading(false); return; }
+      if (pw.length < 6) { setErr("Password min 6 characters"); setLoading(false); return; }
+      try {
+        const r = await fetch(`${API}/api/register`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({name, email, password:pw}) });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || "Registration failed");
+        onSuccess(d.token, d.user);
+      } catch(e) { setErr(e.message); }
+      setLoading(false);
+    };
+
     return (
       <div style={{minHeight:"100vh",background:T.bg}}>
-        <div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"100vh",padding:24}}>
-          <Card style={{padding:36,width:"100%",maxWidth:420}}>
+        <nav style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"16px 28px",borderBottom:`1px solid ${T.border}`}}>
+          <div onClick={onBack} style={{fontFamily:"'Syne',sans-serif",fontSize:20,fontWeight:800,color:T.accent,cursor:"pointer",letterSpacing:"-0.03em"}}>⬡ VeloLaw</div>
+          <Btn v="ghost" size="sm" onClick={onBack}>← Back</Btn>
+        </nav>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"calc(100vh - 57px)",padding:24}}>
+          <Card style={{padding:36,width:"100%",maxWidth:420,animation:"fadeUp .3s ease"}}>
             {mode==="login" ? (
               <>
                 <div style={{fontFamily:"'Syne',sans-serif",fontSize:26,fontWeight:700,marginBottom:5,color:T.text}}>Welcome back</div>
-                <Inp label="Email" type="email" value={email} onChange={setEmail}/>
-                <Inp label="Password" type="password" value={pw} onChange={setPw}/>
-                <Btn full onClick={login} disabled={loading}>{loading?"Signing in\u2026":"Sign in"}</Btn>
+                <div style={{color:T.text2,fontSize:13,marginBottom:24}}>Sign in to your VeloLaw account</div>
+                {err && <div style={{background:"rgba(248,113,113,.1)",border:`1px solid rgba(248,113,113,.3)`,color:T.danger,padding:"10px 14px",borderRadius:8,fontSize:13,marginBottom:14}}>{err}</div>}
+                <Inp label="Email" type="email" value={email} onChange={setEmail} placeholder="you@lab.org"/>
+                <Inp label="Password" type="password" value={pw} onChange={setPw} placeholder="••••••••"/>
+                <Btn full onClick={login} disabled={loading}>{loading?<><Spinner size={13} color="#000"/> Signing in…</>:"Sign in"}</Btn>
+                <div style={{textAlign:"center",marginTop:16,fontSize:13,color:T.text2}}>No account? <span onClick={()=>{setMode("register");setErr("");}} style={{color:T.accent,cursor:"pointer",fontWeight:600}}>Register free</span></div>
               </>
             ) : (
               <>
                 <div style={{fontFamily:"'Syne',sans-serif",fontSize:26,fontWeight:700,marginBottom:5,color:T.text}}>Create account</div>
-                <Inp label="Full name" value={name} onChange={setName}/>
-                <Inp label="Email" type="email" value={email} onChange={setEmail}/>
-                <Inp label="Password" type="password" value={pw} onChange={setPw}/>
-                <Btn full onClick={register} disabled={loading}>{loading?"Creating\u2026":"Create account"}</Btn>
+                <div style={{color:T.text2,fontSize:13,marginBottom:24}}>Free forever — no credit card required</div>
+                {err && <div style={{background:"rgba(248,113,113,.1)",border:`1px solid rgba(248,113,113,.3)`,color:T.danger,padding:"10px 14px",borderRadius:8,fontSize:13,marginBottom:14}}>{err}</div>}
+                <Inp label="Full name" value={name} onChange={setName} placeholder="Ana Researcher"/>
+                <Inp label="Email" type="email" value={email} onChange={setEmail} placeholder="you@lab.org"/>
+                <Inp label="Password" type="password" value={pw} onChange={setPw} placeholder="min. 6 characters"/>
+                <Btn full onClick={register} disabled={loading}>{loading?<><Spinner size={13} color="#000"/> Creating account…</>:"Create free account"}</Btn>
+                <div style={{textAlign:"center",marginTop:16,fontSize:13,color:T.text2}}>Have an account? <span onClick={()=>{setMode("login");setErr("");}} style={{color:T.accent,cursor:"pointer",fontWeight:600}}>Sign in</span></div>
               </>
             )}
           </Card>
@@ -778,19 +935,28 @@ export default function VeloLaw() {
 
   const Dashboard = () => (
     <div style={{minHeight:"100vh",background:T.bg,display:"flex",flexDirection:"column"}}>
-      <nav style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 22px",borderBottom:`1px solid ${T.border}`,background:T.surface}}>
-        <div style={{fontFamily:"'Syne',sans-serif",fontSize:18,fontWeight:800,color:T.accent}}>\u2b21 VeloLaw</div>
-        <Btn v="ghost" size="sm" onClick={doLogout}>Sign out</Btn>
+      <nav style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 22px",borderBottom:`1px solid ${T.border}`,background:"rgba(7,9,14,.95)",backdropFilter:"blur(12px)",position:"sticky",top:0,zIndex:100}}>
+        <div onClick={()=>setPage("landing")} style={{fontFamily:"'Syne',sans-serif",fontSize:18,fontWeight:800,color:T.accent,cursor:"pointer",letterSpacing:"-0.03em"}}>⬡ VeloLaw <span style={{color:T.text3,fontSize:10,fontFamily:"'JetBrains Mono',monospace",fontWeight:400}}>beta</span></div>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <div style={{width:30,height:30,borderRadius:"50%",background:`linear-gradient(135deg,${T.accent},${T.accent2})`,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,fontSize:12,color:"#000"}}>{user?.name?.[0]?.toUpperCase()}</div>
+            <span style={{fontSize:13,color:T.text}}>{user?.name}</span>
+            <Tag>{user?.plan||"free"}</Tag>
+          </div>
+          <Btn v="ghost" size="sm" onClick={doLogout}>Sign out</Btn>
+        </div>
       </nav>
-      <div style={{display:"grid",gridTemplateColumns:"215px 1fr",flex:1}}>
-        <div style={{background:T.surface,borderRight:`1px solid ${T.border}`,padding:"14px 7px"}}>
-          <SbItem id="upload"       icon="\ud83d\udce4" label="New Analysis"   active={tab==="upload"}       onClick={setTab}/>
-          <SbItem id="results"      icon="\ud83d\udcca" label="Results"        active={tab==="results"}      onClick={setTab}/>
-          <SbItem id="equations"    icon="\u222b"  label="Equations"      active={tab==="equations"}    onClick={setTab}/>
-          <SbItem id="network"      icon="\ud83d\udd78" label="Network"        active={tab==="network"}      onClick={setTab}/>
-          <SbItem id="perturbation" icon="\u26a1"  label="Perturbation"   active={tab==="perturbation"} onClick={setTab}/>
-          <SbItem id="ai"           icon="\ud83e\udd16" label="AI Insights"    active={tab==="ai"}           onClick={setTab}/>
-          <SbItem id="history"      icon="\ud83d\udccb" label="History"        active={tab==="history"}      onClick={setTab}/>
+      <div style={{display:"grid",gridTemplateColumns:"215px 1fr",flex:1,maxHeight:"calc(100vh - 57px)",overflow:"hidden"}}>
+        <div style={{background:T.surface,borderRight:`1px solid ${T.border}`,padding:"14px 7px",overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
+          <div style={{fontSize:9,textTransform:"uppercase",letterSpacing:"0.12em",color:T.text3,padding:"4px 12px 6px",fontFamily:"'JetBrains Mono',monospace",fontWeight:500}}>Analysis</div>
+          <SbItem id="upload"       icon="📤" label="New Analysis"   active={tab==="upload"}       onClick={setTab}/>
+          <SbItem id="results"      icon="📊" label="Results"        active={tab==="results"}      onClick={setTab}/>
+          <SbItem id="equations"    icon="∫"  label="Equations"      active={tab==="equations"}    onClick={setTab}/>
+          <SbItem id="network"      icon="🕸" label="Network"        active={tab==="network"}      onClick={setTab}/>
+          <SbItem id="perturbation" icon="⚡" label="Perturbation"   active={tab==="perturbation"} onClick={setTab}/>
+          <SbItem id="ai"           icon="🤖" label="AI Insights"    active={tab==="ai"}           onClick={setTab}/>
+          <div style={{fontSize:9,textTransform:"uppercase",letterSpacing:"0.12em",color:T.text3,padding:"14px 12px 6px",fontFamily:"'JetBrains Mono',monospace",fontWeight:500}}>Account</div>
+          <SbItem id="history"      icon="📋" label="History"        active={tab==="history"}      onClick={setTab}/>
         </div>
         <div style={{overflowY:"auto"}}>
           {tab==="upload"       && <Upload/>}
@@ -808,7 +974,10 @@ export default function VeloLaw() {
   return (
     <>
       {page==="landing"   && <Landing/>}
-      {page==="auth"      && <Auth onSuccess={(t,u)=>{ localStorage.setItem("vl_token",t); localStorage.setItem("vl_user",JSON.stringify(u)); setToken(t); setUser(u); setPage("dashboard"); }}/>}
+      {page==="auth"      && <Auth initialMode={authMode} onBack={()=>setPage("landing")} onSuccess={(t,u)=>{
+        localStorage.setItem("vl_token",t); localStorage.setItem("vl_user",JSON.stringify(u));
+        setToken(t); setUser(u); setPage("dashboard"); pop("Welcome, "+u.name+"!");
+      }}/>}
       {page==="dashboard" && <Dashboard/>}
       <Toast msg={toast.msg} type={toast.type} visible={toast.visible}/>
     </>
