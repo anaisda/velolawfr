@@ -312,6 +312,10 @@ export default function VeloLaw() {
   const [authMode, setAuthMode] = useState("login");
   const [user, setUser]         = useState(null);
   const [token, setToken]       = useState(() => localStorage.getItem("vl_token") || "");
+  // auth form state lives inside Auth component now — these are only for legacy compat
+  const [aName, setAName]   = useState("");
+  const [aEmail, setAEmail] = useState("");
+  const [aPw, setAPw]       = useState("");
   const [tab, setTab]           = useState("upload");
   const [results, setResults]   = useState(null);
   const [history, setHistory]   = useState([]);
@@ -335,12 +339,6 @@ export default function VeloLaw() {
   const [aiLoad, setAiLoad]     = useState(false);
   const [aiErr, setAiErr]       = useState("");
 
-  const [aName, setAName]       = useState("");
-  const [aEmail, setAEmail]     = useState("");
-  const [aPw, setAPw]           = useState("");
-  const [aErr, setAErr]         = useState("");
-  const [aLoading, setALoading] = useState(false);
-
   const pollRef = useRef(null);
 
   // Restore session on load
@@ -360,36 +358,6 @@ export default function VeloLaw() {
   const authHeaders = () => ({ "Authorization": `Bearer ${token}`, "Content-Type": "application/json" });
 
   // ── Auth ──────────────────────────────────────────────────
-  const doLogin = async () => {
-    setAErr(""); setALoading(true);
-    try {
-      const r = await fetch(`${API}/api/login`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({email:aEmail, password:aPw}) });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error || "Login failed");
-      localStorage.setItem("vl_token", d.token);
-      localStorage.setItem("vl_user", JSON.stringify(d.user));
-      setToken(d.token); setUser(d.user); setPage("dashboard");
-      pop("Welcome back, " + d.user.name + "!");
-    } catch(e) { setAErr(e.message); }
-    setALoading(false);
-  };
-
-  const doRegister = async () => {
-    setAErr(""); setALoading(true);
-    if (!aName||!aEmail||!aPw) { setAErr("All fields required"); setALoading(false); return; }
-    if (aPw.length < 6) { setAErr("Password min 6 characters"); setALoading(false); return; }
-    try {
-      const r = await fetch(`${API}/api/register`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({name:aName, email:aEmail, password:aPw}) });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error || "Registration failed");
-      localStorage.setItem("vl_token", d.token);
-      localStorage.setItem("vl_user", JSON.stringify(d.user));
-      setToken(d.token); setUser(d.user); setPage("dashboard");
-      pop("Account created! Welcome, " + d.user.name);
-    } catch(e) { setAErr(e.message); }
-    setALoading(false);
-  };
-
   const doLogout = async () => {
     try { await fetch(`${API}/api/logout`, { method:"POST", headers:authHeaders() }); } catch {}
     localStorage.removeItem("vl_token"); localStorage.removeItem("vl_user");
@@ -897,40 +865,73 @@ export default function VeloLaw() {
     </div>
   );
 
-  const Auth = () => (
-    <div style={{minHeight:"100vh",background:T.bg}}>
-      <nav style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"16px 28px",borderBottom:`1px solid ${T.border}`}}>
-        <div onClick={()=>setPage("landing")} style={{fontFamily:"'Syne',sans-serif",fontSize:20,fontWeight:800,color:T.accent,cursor:"pointer",letterSpacing:"-0.03em"}}>⬡ VeloLaw</div>
-        <Btn v="ghost" size="sm" onClick={()=>setPage("landing")}>← Back</Btn>
-      </nav>
-      <div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"calc(100vh - 57px)",padding:24}}>
-        <Card style={{padding:36,width:"100%",maxWidth:420,animation:"fadeUp .3s ease"}}>
-          {authMode==="login" ? (
-            <>
-              <div style={{fontFamily:"'Syne',sans-serif",fontSize:26,fontWeight:700,marginBottom:5,color:T.text}}>Welcome back</div>
-              <div style={{color:T.text2,fontSize:13,marginBottom:24}}>Sign in to your VeloLaw account</div>
-              {aErr && <div style={{background:"rgba(248,113,113,.1)",border:`1px solid rgba(248,113,113,.3)`,color:T.danger,padding:"10px 14px",borderRadius:8,fontSize:13,marginBottom:14}}>{aErr}</div>}
-              <Inp label="Email" type="email" value={aEmail} onChange={setAEmail} placeholder="you@lab.org"/>
-              <Inp label="Password" type="password" value={aPw} onChange={setAPw} placeholder="••••••••"/>
-              <Btn full onClick={doLogin} disabled={aLoading}>{aLoading?<><Spinner size={13} color="#000"/> Signing in…</>:"Sign in"}</Btn>
-              <div style={{textAlign:"center",marginTop:16,fontSize:13,color:T.text2}}>No account? <span onClick={()=>{setAuthMode("register");setAErr("");}} style={{color:T.accent,cursor:"pointer",fontWeight:600}}>Register free</span></div>
-            </>
-          ) : (
-            <>
-              <div style={{fontFamily:"'Syne',sans-serif",fontSize:26,fontWeight:700,marginBottom:5,color:T.text}}>Create account</div>
-              <div style={{color:T.text2,fontSize:13,marginBottom:24}}>Free forever — no credit card required</div>
-              {aErr && <div style={{background:"rgba(248,113,113,.1)",border:`1px solid rgba(248,113,113,.3)`,color:T.danger,padding:"10px 14px",borderRadius:8,fontSize:13,marginBottom:14}}>{aErr}</div>}
-              <Inp label="Full name" value={aName} onChange={setAName} placeholder="Ana Researcher"/>
-              <Inp label="Email" type="email" value={aEmail} onChange={setAEmail} placeholder="you@lab.org"/>
-              <Inp label="Password" type="password" value={aPw} onChange={setAPw} placeholder="min. 6 characters"/>
-              <Btn full onClick={doRegister} disabled={aLoading}>{aLoading?<><Spinner size={13} color="#000"/> Creating account…</>:"Create free account"}</Btn>
-              <div style={{textAlign:"center",marginTop:16,fontSize:13,color:T.text2}}>Have an account? <span onClick={()=>{setAuthMode("login");setAErr("");}} style={{color:T.accent,cursor:"pointer",fontWeight:600}}>Sign in</span></div>
-            </>
-          )}
-        </Card>
+  const Auth = ({ initialMode, onSuccess, onBack }) => {
+    const [mode, setMode]       = useState(initialMode || "login");
+    const [name, setName]       = useState("");
+    const [email, setEmail]     = useState("");
+    const [pw, setPw]           = useState("");
+    const [err, setErr]         = useState("");
+    const [loading, setLoading] = useState(false);
+
+    const login = async () => {
+      setErr(""); setLoading(true);
+      try {
+        const r = await fetch(`${API}/api/login`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({email, password:pw}) });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || "Login failed");
+        onSuccess(d.token, d.user);
+      } catch(e) { setErr(e.message); }
+      setLoading(false);
+    };
+
+    const register = async () => {
+      setErr(""); setLoading(true);
+      if (!name||!email||!pw) { setErr("All fields required"); setLoading(false); return; }
+      if (pw.length < 6) { setErr("Password min 6 characters"); setLoading(false); return; }
+      try {
+        const r = await fetch(`${API}/api/register`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({name, email, password:pw}) });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || "Registration failed");
+        onSuccess(d.token, d.user);
+      } catch(e) { setErr(e.message); }
+      setLoading(false);
+    };
+
+    return (
+      <div style={{minHeight:"100vh",background:T.bg}}>
+        <nav style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"16px 28px",borderBottom:`1px solid ${T.border}`}}>
+          <div onClick={onBack} style={{fontFamily:"'Syne',sans-serif",fontSize:20,fontWeight:800,color:T.accent,cursor:"pointer",letterSpacing:"-0.03em"}}>⬡ VeloLaw</div>
+          <Btn v="ghost" size="sm" onClick={onBack}>← Back</Btn>
+        </nav>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"calc(100vh - 57px)",padding:24}}>
+          <Card style={{padding:36,width:"100%",maxWidth:420,animation:"fadeUp .3s ease"}}>
+            {mode==="login" ? (
+              <>
+                <div style={{fontFamily:"'Syne',sans-serif",fontSize:26,fontWeight:700,marginBottom:5,color:T.text}}>Welcome back</div>
+                <div style={{color:T.text2,fontSize:13,marginBottom:24}}>Sign in to your VeloLaw account</div>
+                {err && <div style={{background:"rgba(248,113,113,.1)",border:`1px solid rgba(248,113,113,.3)`,color:T.danger,padding:"10px 14px",borderRadius:8,fontSize:13,marginBottom:14}}>{err}</div>}
+                <Inp label="Email" type="email" value={email} onChange={setEmail} placeholder="you@lab.org"/>
+                <Inp label="Password" type="password" value={pw} onChange={setPw} placeholder="••••••••"/>
+                <Btn full onClick={login} disabled={loading}>{loading?<><Spinner size={13} color="#000"/> Signing in…</>:"Sign in"}</Btn>
+                <div style={{textAlign:"center",marginTop:16,fontSize:13,color:T.text2}}>No account? <span onClick={()=>{setMode("register");setErr("");}} style={{color:T.accent,cursor:"pointer",fontWeight:600}}>Register free</span></div>
+              </>
+            ) : (
+              <>
+                <div style={{fontFamily:"'Syne',sans-serif",fontSize:26,fontWeight:700,marginBottom:5,color:T.text}}>Create account</div>
+                <div style={{color:T.text2,fontSize:13,marginBottom:24}}>Free forever — no credit card required</div>
+                {err && <div style={{background:"rgba(248,113,113,.1)",border:`1px solid rgba(248,113,113,.3)`,color:T.danger,padding:"10px 14px",borderRadius:8,fontSize:13,marginBottom:14}}>{err}</div>}
+                <Inp label="Full name" value={name} onChange={setName} placeholder="Ana Researcher"/>
+                <Inp label="Email" type="email" value={email} onChange={setEmail} placeholder="you@lab.org"/>
+                <Inp label="Password" type="password" value={pw} onChange={setPw} placeholder="min. 6 characters"/>
+                <Btn full onClick={register} disabled={loading}>{loading?<><Spinner size={13} color="#000"/> Creating account…</>:"Create free account"}</Btn>
+                <div style={{textAlign:"center",marginTop:16,fontSize:13,color:T.text2}}>Have an account? <span onClick={()=>{setMode("login");setErr("");}} style={{color:T.accent,cursor:"pointer",fontWeight:600}}>Sign in</span></div>
+              </>
+            )}
+          </Card>
+        </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   const Dashboard = () => (
     <div style={{minHeight:"100vh",background:T.bg,display:"flex",flexDirection:"column"}}>
@@ -973,7 +974,10 @@ export default function VeloLaw() {
   return (
     <>
       {page==="landing"   && <Landing/>}
-      {page==="auth"      && <Auth/>}
+      {page==="auth"      && <Auth initialMode={authMode} onBack={()=>setPage("landing")} onSuccess={(t,u)=>{
+        localStorage.setItem("vl_token",t); localStorage.setItem("vl_user",JSON.stringify(u));
+        setToken(t); setUser(u); setPage("dashboard"); pop("Welcome, "+u.name+"!");
+      }}/>}
       {page==="dashboard" && <Dashboard/>}
       <Toast msg={toast.msg} type={toast.type} visible={toast.visible}/>
     </>
