@@ -840,7 +840,7 @@ export default function VeloLaw() {
         <p style={{fontSize:17,color:T.text2,maxWidth:540,margin:"0 auto 36px",lineHeight:1.7}}>VeloLaw turns RNA velocity data into explicit, readable regulatory equations — so you can understand, validate, and act on the biology.</p>
         <div style={{display:"flex",gap:14,justifyContent:"center",flexWrap:"wrap"}}>
           <Btn size="lg" onClick={()=>{setAuthMode("register");setPage("auth");}}>▶ Start free analysis</Btn>
-          <Btn v="secondary" size="lg" onClick={()=>{setAuthMode("register");setPage("auth");}}>📊 View demo results</Btn>
+          <Btn v="secondary" size="lg" onClick={()=>{setPage("dashboard");setTab("upload");setTimeout(()=>runDemoAnalysis(),150);}}>📊 Live demo</Btn>
         </div>
       </div>
       <div style={{padding:"48px 24px 80px",maxWidth:1040,margin:"0 auto"}}>
@@ -939,11 +939,11 @@ export default function VeloLaw() {
         <div onClick={()=>setPage("landing")} style={{fontFamily:"'Syne',sans-serif",fontSize:18,fontWeight:800,color:T.accent,cursor:"pointer",letterSpacing:"-0.03em"}}>⬡ VeloLaw <span style={{color:T.text3,fontSize:10,fontFamily:"'JetBrains Mono',monospace",fontWeight:400}}>beta</span></div>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
           <div style={{display:"flex",alignItems:"center",gap:8}}>
-            <div style={{width:30,height:30,borderRadius:"50%",background:`linear-gradient(135deg,${T.accent},${T.accent2})`,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,fontSize:12,color:"#000"}}>{user?.name?.[0]?.toUpperCase()}</div>
-            <span style={{fontSize:13,color:T.text}}>{user?.name}</span>
-            <Tag>{user?.plan||"free"}</Tag>
+            <div style={{width:30,height:30,borderRadius:"50%",background:`linear-gradient(135deg,${T.accent},${T.accent2})`,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,fontSize:12,color:"#000"}}>{user?.name?.[0]?.toUpperCase()||"👤"}</div>
+            <span style={{fontSize:13,color:T.text}}>{user?.name||"Guest"}</span>
+            <Tag>{user?.plan||"demo"}</Tag>
           </div>
-          <Btn v="ghost" size="sm" onClick={doLogout}>Sign out</Btn>
+          {user ? <Btn v="ghost" size="sm" onClick={doLogout}>Sign out</Btn> : <Btn v="secondary" size="sm" onClick={()=>{setPage("auth");setAuthMode("register");}}>Sign up free</Btn>}
         </div>
       </nav>
       <div style={{display:"grid",gridTemplateColumns:"215px 1fr",flex:1,maxHeight:"calc(100vh - 57px)",overflow:"hidden"}}>
