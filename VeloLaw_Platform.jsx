@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 
 // ─── API base — points to your real backend ──────────────────
 const API = "http://204.168.156.143:3000";
@@ -307,11 +307,27 @@ const Spinner = ({size=17,color}) => (
 // ════════════════════════════════════════════════════════════
 //  MAIN APP
 // ════════════════════════════════════════════════════════════
-export default function VeloLaw() {
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(e) { return { error: e }; }
+  render() {
+    if (this.state.error) return (
+      <div style={{minHeight:"100vh",background:"#07090e",display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:16,fontFamily:"Inter,sans-serif"}}>
+        <div style={{fontSize:32}}>⚠️</div>
+        <div style={{color:"#f0f2f8",fontSize:18,fontWeight:600}}>Something went wrong</div>
+        <div style={{color:"#8fa3bf",fontSize:13,maxWidth:400,textAlign:"center"}}>{this.state.error?.message}</div>
+        <button onClick={()=>window.location.reload()} style={{background:"#4ade80",color:"#000",border:"none",padding:"10px 24px",borderRadius:8,fontWeight:700,cursor:"pointer",fontSize:14}}>Reload</button>
+      </div>
+    );
+    return this.props.children;
+  }
+}
+
+function VeloLawInner() {
   const [page, setPage]         = useState("landing");
   const [authMode, setAuthMode] = useState("login");
   const [user, setUser]         = useState(null);
-  const [token, setToken]       = useState(() => localStorage.getItem("vl_token") || "");
+  const [token, setToken]       = useState(() => { try { return localStorage.getItem("vl_token") || ""; } catch { return ""; } });
   // auth form state lives inside Auth component now — these are only for legacy compat
   const [aName, setAName]   = useState("");
   const [aEmail, setAEmail] = useState("");
@@ -346,7 +362,7 @@ export default function VeloLaw() {
     const t = localStorage.getItem("vl_token");
     const u = localStorage.getItem("vl_user");
     if (t && u) {
-      try { setToken(t); setUser(JSON.parse(u)); setPage("dashboard"); } catch {}
+      try { setToken(t); setUser(JSON.parse(u)); setPage("dashboard"); } catch(e) { localStorage.removeItem("vl_token"); localStorage.removeItem("vl_user"); }
     }
   }, []);
 
@@ -982,4 +998,8 @@ export default function VeloLaw() {
       <Toast msg={toast.msg} type={toast.type} visible={toast.visible}/>
     </>
   );
+}
+
+export default function VeloLaw() {
+  return <ErrorBoundary><VeloLawInner/></ErrorBoundary>;
 }
